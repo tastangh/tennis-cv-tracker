@@ -138,55 +138,50 @@ def detect_ball(frame, hsv_frame, fg_mask, court_polygon):
     if court_polygon is None:
         return None
 
-    LOWER_BALL = np.array([25, 80, 100])
-    UPPER_BALL = np.array([40, 255, 255])
-    color_mask = cv2.inRange(hsv_frame, LOWER_BALL, UPPER_BALL)
+    # Sadece hareket maskesi (fg_mask) ile çalış
+    motion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    fg_mask_dilated = cv2.dilate(fg_mask, motion_kernel, iterations=2)
 
-    contours_color, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours_motion, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    all_contours = contours_color + contours_motion
+    contours, _ = cv2.findContours(fg_mask_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     best_candidate = None
     highest_score = -1
 
-    # 🔐 Skorbord bölgesi (sol alt)
     SKORBOARD_REGION = (0, frame.shape[0] - 100, 200, 100)
 
-    for c in all_contours:
+    for c in contours:
         area = cv2.contourArea(c)
-        if area < 20 or area > 150:
+        if area < 5 or area > 300:
             continue
 
         (x, y, w, h) = cv2.boundingRect(c)
 
-        # 🎯 Skorbord kutusunu tamamen dışla
+        # Skorbord bölgesi dışla
         if (SKORBOARD_REGION[0] <= x <= SKORBOARD_REGION[0] + SKORBOARD_REGION[2] and
             SKORBOARD_REGION[1] <= y <= SKORBOARD_REGION[1] + SKORBOARD_REGION[3]):
             continue
 
+        # Kort içinde mi?
         if cv2.pointPolygonTest(court_polygon, (x + w // 2, y + h // 2), False) < 0:
             continue
 
-        roi_motion_mask = fg_mask[y:y + h, x:x + w]
-        motion_ratio = cv2.countNonZero(roi_motion_mask) / (w * h + 1e-6)
-        if motion_ratio < 0.05:
-            continue
-
+        # Şekil değerlendirmesi
         aspect_ratio = w / float(h) if h > 0 else 0
-        shape_score = 1.0 - abs(1.0 - aspect_ratio)
+        shape_score = 1.0 - abs(1.0 - aspect_ratio)  # 1'e ne kadar yakınsa o kadar dairesel
 
-        roi_color_mask = color_mask[y:y + h, x:x + w]
-        color_ratio = cv2.countNonZero(roi_color_mask) / (w * h + 1e-6)
-        if color_ratio < (np.mean(color_mask) / 255) * 0.5:
-            continue
+        # Hareket yoğunluğu
+        roi_motion = fg_mask_dilated[y:y + h, x:x + w]
+        motion_ratio = cv2.countNonZero(roi_motion) / (w * h + 1e-6)
 
-        final_score = shape_score * color_ratio * (motion_ratio + 0.1)
+        # Puanlama sadece hareket ve şekle göre
+        final_score = shape_score * (motion_ratio + 0.1)
 
         if final_score > highest_score:
             highest_score = final_score
             best_candidate = ((x, y, w, h), (x + w // 2, y + h // 2))
 
-    if highest_score > 0.15:
+    # Eşik düşürüldü çünkü color yok
+    if highest_score > 0.9:
         return best_candidate
     else:
         return None
