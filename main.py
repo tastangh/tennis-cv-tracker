@@ -1,245 +1,194 @@
 import cv2
 import numpy as np
-import sys
 import math
 
-# --- 1. AYARLAR VE GLOBAL DEĞİŞKENLER ---
+# --- ANA AYARLAR ---
+INPUT_VIDEO_PATH = 'tennis.mp4'
+BLUR_INTENSITY = 35  # Bulanıklık yoğunluğu. Tek sayı olmalı (örn: 25, 35, 45).
 
-# Video dosyasının yolu
-VIDEO_PATH = "tennis_video.mp4" 
-DEBUG = False # Otomatik kort tespiti adımlarını görmek için True yapın
+# --- OTOMATİK KORT TESPİTİ PARAMETRELERİ ---
+CANNY_LOW_THRESHOLD = 50
+CANNY_HIGH_THRESHOLD = 150
+HOUGH_THRESHOLD = 80
+HOUGH_MIN_LINE_LENGTH = 80
+HOUGH_MAX_LINE_GAP = 25
 
-# Genişletilmiş odak alanı için görsel dolgu miktarı (piksel)
-VISUAL_PADDING = 135
+# --- OYUNCU VE TOP TESPİTİ PARAMETRELERİ ---
+TOP_BG_SUBTRACTOR = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
+BOTTOM_BG_SUBTRACTOR = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=40, detectShadows=False)
+MIN_PLAYER_AREA = 300
+MAX_PLAYER_AREA = 8000
+MIN_PLAYER_ASPECT_RATIO = 1.2
 
-# --- Otomatik Kort Tespiti Parametreleri ---
-# Videodaki kortun rengine göre bu HSV aralığını ayarlayın (şu an mavi tonlar için)
-# Yeşil kortlar için: (35, 50, 50) - (85, 255, 255)a
-COURT_HSV_LOWER = np.array([95, 100, 50])
-COURT_HSV_UPPER = np.array([125, 255, 255])
-MORPH_KERNEL_SIZE = 15 # Kort maskesindeki delikleri kapatmak için kullanılacak kernel boyutu
+MIN_BALL_AREA = 35
+LOWER_BALL_COLOR_HSV = np.array([28, 80, 130])
+UPPER_BALL_COLOR_HSV = np.array([45, 255, 255])
 
-# --- Nesne Tespiti Parametreleri ---
-# Dinamik alan eşiği için parametreler
-PLAYER_MIN_AREA_FAR = 300      # Uzaktaki (üstteki) oyuncu için minimum alan
-PLAYER_MIN_AREA_CLOSE = 700    # Yakındaki (alttaki) oyuncu için minimum alan
-PLAYER_MAX_AREA = 6000         # Maksimum alan sabit kalabilir
+# --- YARDIMCI FONKSİYONLAR ---
+# (Bu fonksiyonlar önceki versiyonla aynı, değişiklik yok)
+def find_line_intersection(line1, line2):
+    x1, y1, x2, y2 = line1; x3, y3, x4, y4 = line2
+    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if den == 0: return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den
+    if 0 < t < 1 and u > 0: return int(x1 + t * (x2 - x1)), int(y1 + t * (y2 - y1))
+    return None
 
-# Top için parametreler
-BALL_MIN_AREA = 40
-BALL_MAX_AREA = 300
-BALL_HSV_LOWER = (25, 80, 100)
-BALL_HSV_UPPER = (45, 255, 255)
+def average_lines(lines, frame_height):
+    if lines is None or len(lines) == 0: return None
+    vx, vy, x, y = cv2.fitLine(np.reshape(lines, (-1, 2)), cv2.DIST_L2, 0, 0.01, 0.01)
+    vx, vy, x, y = vx[0], vy[0], x[0], y[0]
+    return [int(x - (y - 0) * vx / vy), 0, int(x - (y - frame_height) * vx / vy), frame_height]
 
-# --- Replay Tespiti ---
-# Kort alanının % kaçının aniden hareketlenmesi durumunda sahne değişimi kabul edilecek
-SCENE_CHANGE_THRESHOLD = 0.60
+def detect_court_automatically(frame):
+    height, width, _ = frame.shape
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, CANNY_LOW_THRESHOLD, CANNY_HIGH_THRESHOLD)
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, HOUGH_THRESHOLD, None, HOUGH_MIN_LINE_LENGTH, HOUGH_MAX_LINE_GAP)
+    if lines is None: return None
+    top_lines, bottom_lines, left_lines, right_lines = [], [], [], []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+        if abs(angle) < 30:
+            if y1 < height * 0.65 and y2 < height * 0.65: top_lines.append(line)
+            else: bottom_lines.append(line)
+        elif abs(angle) > 40 and abs(angle) < 85:
+            if angle > 0: right_lines.append(line)
+            else: left_lines.append(line)
+    avg_top = average_lines(top_lines, height)
+    avg_bottom = average_lines(bottom_lines, height)
+    avg_left = average_lines(left_lines, height)
+    avg_right = average_lines(right_lines, height)
+    if not all([avg_top, avg_bottom, avg_left, avg_right]): return None
+    top_left = find_line_intersection(avg_top, avg_left)
+    top_right = find_line_intersection(avg_top, avg_right)
+    bottom_left = find_line_intersection(avg_bottom, avg_left)
+    bottom_right = find_line_intersection(avg_bottom, avg_right)
+    if not all([top_left, top_right, bottom_left, bottom_right]): return None
+    return np.float32([top_left, top_right, bottom_right, bottom_left])
 
-# --- Perspektif Dönüşümü için Global Değişkenler ---
-width, height = 450, 780
-destination_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-homography_matrix = None
+def create_court_schematic(width, height):
+    schematic = np.zeros((height, width, 3), dtype=np.uint8)
+    schematic[:] = (34, 98, 30); cv2.rectangle(schematic, (0, 0), (width-1, height-1), (255, 255, 255), 2)
+    cv2.line(schematic, (0, int(height/2)), (width-1, int(height/2)), (255, 255, 255), 2)
+    return schematic
 
-# --- 2. YARDIMCI FONKSİYONLAR ---
-
-def find_court_corners_auto(frame):
-    """Renk segmentasyonu ve kontur analizi kullanarak kort köşelerini otomatik olarak bulur."""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, COURT_HSV_LOWER, COURT_HSV_UPPER)
-    kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    
-    if DEBUG: cv2.imshow("Debug - Kort Renk Maskesi", mask)
-    
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        print("Hata: Kort konturu bulunamadı. HSV renk aralığını kontrol edin.")
-        return None
-
-    largest_contour = max(contours, key=cv2.contourArea)
-    sum_ = largest_contour.sum(axis=2)
-    diff_ = np.diff(largest_contour, axis=2)
-    
-    top_left = largest_contour[np.argmin(sum_)]
-    bottom_right = largest_contour[np.argmax(sum_)]
-    top_right = largest_contour[np.argmax(diff_)]
-    bottom_left = largest_contour[np.argmin(diff_)]
-    
-    court_points = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32).reshape(4, 2)
-    return court_points
-
-def expand_court_polygon(points, padding):
-    """Verilen 4 köşe noktasını dışa doğru 'padding' miktarı kadar ittirerek yeni bir poligon oluşturur."""
-    tl, tr, br, bl = points[0], points[1], points[2], points[3]
-    vec_tl_tr = tl - tr; vec_tl_bl = tl - bl
-    vec_tr_tl = tr - tl; vec_tr_br = tr - br
-    vec_bl_tl = bl - tl; vec_bl_br = bl - br
-    vec_br_tr = br - tr; vec_br_bl = br - bl
-
-    def normalize(v): return v / (np.linalg.norm(v) + 1e-6)
-
-    new_tl = tl + (normalize(vec_tl_tr) + normalize(vec_tl_bl)) * padding
-    new_tr = tr + (normalize(vec_tr_tl) + normalize(vec_tr_br)) * padding
-    new_bl = bl + (normalize(vec_bl_tl) + normalize(vec_bl_br)) * padding
-    new_br = br + (normalize(vec_br_tr) + normalize(vec_br_bl)) * padding
-
-    return np.array([new_tl, new_tr, new_br, new_bl], dtype=np.float32)
-
-def create_court_mask(frame, court_points):
-    """Verilen köşe noktalarından bir poligon maskesi oluşturur."""
-    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-    cv2.fillPoly(mask, [np.int32(court_points)], (255))
-    return mask
-
-def apply_blur_outside_mask(frame, mask):
-    """Maskenin dışındaki alanı blurlar."""
-    blurred_frame = cv2.GaussianBlur(frame, (31, 31), 0)
-    inv_mask = cv2.bitwise_not(mask)
-    background = cv2.bitwise_and(blurred_frame, blurred_frame, mask=inv_mask)
-    foreground = cv2.bitwise_and(frame, frame, mask=mask)
-    return cv2.add(background, foreground)
-
-def get_dynamic_player_min_area(y_pos, y_top, y_bottom):
-    """Bir konturun dikey konumuna göre olması gereken min alanı lineer olarak hesaplar."""
-    if y_bottom == y_top: return PLAYER_MIN_AREA_CLOSE
-    relative_pos = np.clip((y_pos - y_top) / (y_bottom - y_top), 0, 1)
-    return PLAYER_MIN_AREA_FAR + relative_pos * (PLAYER_MIN_AREA_CLOSE - PLAYER_MIN_AREA_FAR)
-
-def get_best_candidates(contours, frame, tight_court_points):
-    """En iyi oyuncu ve top adaylarını seçer. Oyuncular konum ve dinamik alana göre filtrelenir."""
-    player_candidates, ball_candidates = [], []
-    
-    y_top_court = min(tight_court_points[0][1], tight_court_points[1][1])
-    y_bottom_court = max(tight_court_points[2][1], tight_court_points[3][1])
-    
+def find_player_in_zone(frame, zone_mask, bg_subtractor):
+    masked_frame = cv2.bitwise_and(frame, frame, mask=zone_mask)
+    fg_mask = bg_subtractor.apply(masked_frame)
+    fg_mask = cv2.threshold(fg_mask, 250, 255, cv2.THRESH_BINARY)[1]
+    fg_mask = cv2.dilate(fg_mask, np.ones((5,5), np.uint8), iterations=2)
+    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    valid_candidates = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        x, y, w, h = cv2.boundingRect(cnt)
-        
-        # --- Oyuncu Tespiti ---
-        dynamic_min_area = get_dynamic_player_min_area(y + h, y_top_court, y_bottom_court)
-        player_pos = (x + w // 2, y + h)
-        is_on_court = cv2.pointPolygonTest(tight_court_points, player_pos, False) >= 0
+        if MIN_PLAYER_AREA < area < MAX_PLAYER_AREA:
+            x, y, w, h = cv2.boundingRect(cnt)
+            if w > 0 and h > 0:
+                if h / float(w) > MIN_PLAYER_ASPECT_RATIO:
+                    valid_candidates.append((area, (x, y, w, h)))
+    if not valid_candidates: return None
+    valid_candidates.sort(key=lambda item: item[0], reverse=True)
+    return valid_candidates[0][1]
 
-        if dynamic_min_area < area < PLAYER_MAX_AREA and is_on_court:
-            player_candidates.append({'area': area, 'bbox': (x, y, w, h), 'pos': player_pos})
-
-        # --- Top Tespiti ---
-        if BALL_MIN_AREA < area < BALL_MAX_AREA:
-            roi = frame[y:y+h, x:x+w]
-            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            color_mask = cv2.inRange(hsv_roi, BALL_HSV_LOWER, BALL_HSV_UPPER)
-            color_ratio = cv2.countNonZero(color_mask) / ((w * h) + 1e-6)
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter == 0: continue
-            circularity = 4 * math.pi * area / (perimeter**2)
-            if color_ratio > 0.4 and circularity > 0.5:
-                score = (color_ratio * 0.6) + (circularity * 0.4)
-                ball_pos = (x + w // 2, y + h // 2)
-                ball_candidates.append({'score': score, 'bbox': (x, y, w, h), 'pos': ball_pos})
-    
-    player_candidates.sort(key=lambda p: p['area'], reverse=True)
-    ball_candidates.sort(key=lambda b: b['score'], reverse=True)
-    
-    return player_candidates[:2], ball_candidates[0] if ball_candidates else None
-
-def draw_2d_court(players_coords, ball_coord):
-    """Kuş bakışı 2D kort krokisini ve nesnelerin konumlarını çizer."""
-    court_2d = np.zeros((height + 50, width + 50, 3), dtype=np.uint8)
-    court_2d[:, :] = (34, 139, 34) # Orman yeşili
-    court_area = (25, 25)
-
-    cv2.rectangle(court_2d, court_area, (width + court_area[0], height + court_area[1]), (255, 255, 255), 2)
-    cv2.line(court_2d, (court_area[0], court_area[1] + height // 2), (width + court_area[0], court_area[1] + height // 2), (255, 255, 255), 2)
-    
-    if homography_matrix is not None:
-        if players_coords:
-            player_points_2d = cv2.perspectiveTransform(np.float32(players_coords).reshape(-1, 1, 2), homography_matrix)
-            for point in player_points_2d:
-                x, y = int(point[0][0]), int(point[0][1])
-                cv2.circle(court_2d, (x + court_area[0], y + court_area[1]), 10, (0, 0, 255), -1)
-        if ball_coord:
-            ball_point_2d = cv2.perspectiveTransform(np.float32([ball_coord]).reshape(-1, 1, 2), homography_matrix)
-            x, y = int(ball_point_2d[0][0][0]), int(ball_point_2d[0][0][1])
-            cv2.circle(court_2d, (x + court_area[0], y + court_area[1]), 7, (0, 255, 255), -1)
-    return court_2d
-
-
-# --- 3. ANA İŞLEM DÖNGÜSÜ ---
-
+# --- ANA ÇALIŞMA FONKSİYONU ---
 def main():
-    global homography_matrix
-    cap = cv2.VideoCapture(VIDEO_PATH)
-    if not cap.isOpened(): print(f"Hata: Video dosyası açılamadı -> {VIDEO_PATH}"); return
+    cap = cv2.VideoCapture(INPUT_VIDEO_PATH)
+    if not cap.isOpened(): return
     ret, first_frame = cap.read()
-    if not ret: print("Hata: Videodan ilk kare okunamadı."); return
-    
-    # 1. Adım: Kortun KESİN sınırlarını otomatik bul
-    tight_court_points = find_court_corners_auto(first_frame)
-    if tight_court_points is None: sys.exit()
-    
-    # 2. Adım: Görsel blurlama için GENİŞLETİLMİŞ poligonu oluştur
-    expanded_court_points = expand_court_polygon(tight_court_points, VISUAL_PADDING)
-    
-    # 3. Adım: Hazırlıklar
-    homography_matrix, _ = cv2.findHomography(tight_court_points, destination_points)
-    blur_mask = create_court_mask(first_frame, expanded_court_points)
-    logic_mask = create_court_mask(first_frame, tight_court_points)
-    logic_mask_area = cv2.countNonZero(logic_mask)
-    bg_subtractor = cv2.createBackgroundSubtractorMOG2(history=150, varThreshold=40, detectShadows=False)
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Video bitti.")
-            break
-
-        # Blurlama her zaman geniş maskeye göre yapılır
-        display_frame = apply_blur_outside_mask(frame, blur_mask)
-
-        # Hareket tespiti dar (mantıksal) maskeye göre yapılır
-        fg_mask = bg_subtractor.apply(frame)
-        fg_mask_court_only = cv2.bitwise_and(fg_mask, fg_mask, mask=logic_mask)
-        motion_ratio = cv2.countNonZero(fg_mask_court_only) / (logic_mask_area + 1e-6)
-
-        # Boş bir 2D kroki oluştur, tespit olursa üzerine çizilecek
-        court_2d_view = draw_2d_court([], None)
-
-        if motion_ratio > SCENE_CHANGE_THRESHOLD:
-            cv2.putText(display_frame, "REPLAY / YAKIN CEKIM", (50, 100), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (0, 255, 255), 2)
-        else:
-            kernel = np.ones((5, 5), np.uint8)
-            fg_mask_clean = cv2.morphologyEx(fg_mask_court_only, cv2.MORPH_CLOSE, kernel, iterations=2)
-            contours, _ = cv2.findContours(fg_mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            detected_players, detected_ball = get_best_candidates(contours, frame, tight_court_points)
-
-            player_positions_for_2d = []
-            for player in detected_players:
-                x, y, w, h = player['bbox']
-                cv2.rectangle(display_frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
-                player_positions_for_2d.append(player['pos'])
-            
-            ball_position_for_2d = None
-            if detected_ball:
-                x, y, w, h = detected_ball['bbox']
-                cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 255), 2)
-                ball_position_for_2d = detected_ball['pos']
-            
-            # 2D krokiyi tespit edilen nesnelerle güncelle
-            court_2d_view = draw_2d_court(player_positions_for_2d, ball_position_for_2d)
-
-        # Pencereleri göster
-        cv2.imshow("Tam Otomatik Tenis Analizi", display_frame)
-        cv2.imshow("2D Kroki", court_2d_view)
+    if not ret: return
         
-        if cv2.waitKey(25) & 0xFF == ord('q'):
-            break
+    source_points = detect_court_automatically(first_frame)
+    if source_points is None:
+        print("Otomatik kort tespiti başarısız oldu.")
+        return
+    
+    frame_height, frame_width, _ = first_frame.shape
+    mid_left = ((source_points[0][0] + source_points[3][0]) / 2, (source_points[0][1] + source_points[3][1]) / 2)
+    mid_right = ((source_points[1][0] + source_points[2][0]) / 2, (source_points[1][1] + source_points[2][1]) / 2)
+    top_half_poly = np.array([source_points[0], source_points[1], mid_right, mid_left], dtype=np.int32)
+    top_half_mask = np.zeros((frame_height, frame_width), dtype=np.uint8)
+    cv2.fillPoly(top_half_mask, [top_half_poly], 255)
+    bottom_half_poly = np.array([mid_left, mid_right, source_points[2], source_points[3]], dtype=np.int32)
+    bottom_half_mask = np.zeros((frame_height, frame_width), dtype=np.uint8)
+    cv2.fillPoly(bottom_half_mask, [bottom_half_poly], 255)
+    full_court_mask = cv2.bitwise_or(top_half_mask, bottom_half_mask)
+    
+    schematic_width, schematic_height = 411, 894
+    dest_points = np.float32([[0, 0], [schematic_width, 0], [schematic_width, schematic_height], [0, schematic_height]])
+    homography_matrix = cv2.getPerspectiveTransform(source_points, dest_points)
+    
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    prev_frame_gray = None
+    
+    while cap.isOpened():
+        ret, frame_orig = cap.read() # Orijinal kareyi ayrı bir değişkende tut
+        if not ret: break
+
+        # --- YENİ: KORT DIŞINI BULANIKLAŞTIRMA ---
+        # 1. Görüntünün tamamını bulanıklaştır
+        blurred_frame = cv2.GaussianBlur(frame_orig, (BLUR_INTENSITY, BLUR_INTENSITY), 0)
+        # 2. Kort maskesinin tersini al (kort dışı beyaz, içi siyah)
+        inverse_court_mask = cv2.bitwise_not(full_court_mask)
+        # 3. Sadece bulanık arka planı izole et
+        background = cv2.bitwise_and(blurred_frame, blurred_frame, mask=inverse_court_mask)
+        # 4. Sadece keskin kort alanını izole et
+        foreground = cv2.bitwise_and(frame_orig, frame_orig, mask=full_court_mask)
+        # 5. İkisini birleştirerek son görüntü karesini oluştur
+        frame = cv2.add(background, foreground)
+        
+        # --- Bundan sonraki tüm işlemler bu yeni `frame` üzerinde yapılacak ---
+
+        schematic = create_court_schematic(schematic_width, schematic_height)
+        
+        # Tespitler orijinal (bulanıklaştırılmamış) kare üzerinde yapılmalı
+        top_player_bbox = find_player_in_zone(frame_orig, top_half_mask, TOP_BG_SUBTRACTOR)
+        bottom_player_bbox = find_player_in_zone(frame_orig, bottom_half_mask, BOTTOM_BG_SUBTRACTOR)
+        
+        player_positions = []
+        if top_player_bbox:
+            x, y, w, h = top_player_bbox; cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+            player_positions.append((x + w // 2, y + h))
+        if bottom_player_bbox:
+            x, y, w, h = bottom_player_bbox; cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+            player_positions.append((x + w // 2, y + h))
+
+        frame_gray = cv2.cvtColor(frame_orig, cv2.COLOR_BGR2GRAY)
+        masked_gray = cv2.bitwise_and(frame_gray, frame_gray, mask=full_court_mask)
+        ball_position = None
+        if prev_frame_gray is not None:
+            frame_diff = cv2.absdiff(prev_frame_gray, masked_gray)
+            _, diff_thresh = cv2.threshold(frame_diff, 20, 255, cv2.THRESH_BINARY)
+            hsv = cv2.cvtColor(frame_orig, cv2.COLOR_BGR2HSV)
+            color_mask = cv2.inRange(hsv, LOWER_BALL_COLOR_HSV, UPPER_BALL_COLOR_HSV)
+            combined_mask = cv2.bitwise_and(diff_thresh, color_mask)
+            contours_ball, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours_ball:
+                best_ball = max(contours_ball, key=cv2.contourArea)
+                if cv2.contourArea(best_ball) > MIN_BALL_AREA:
+                    (x, y), _ = cv2.minEnclosingCircle(best_ball)
+                    ball_position = (int(x), int(y))
+                    cv2.circle(frame, ball_position, 10, (0, 255, 255), 2)
+        prev_frame_gray = masked_gray.copy()
+        
+        if player_positions:
+            trans_points = cv2.perspectiveTransform(np.array([player_positions], dtype='float32'), homography_matrix)
+            if trans_points is not None: [cv2.circle(schematic, (int(p[0]), int(p[1])), 12, (255, 255, 0), -1) for p in trans_points[0]]
+        if ball_position:
+            trans_point = cv2.perspectiveTransform(np.array([[ball_position]], dtype='float32'), homography_matrix)
+            if trans_point is not None: cv2.circle(schematic, (int(trans_point[0][0][0]), int(trans_point[0][0][1])), 8, (0, 0, 255), -1)
+        
+        h, w, _ = frame.shape
+        schematic_resized = cv2.resize(schematic, (int(w * 0.4), h))
+        combined_view = np.hstack((frame, schematic_resized))
+        cv2.imshow('Otomatik Tenis Takip Sistemi', combined_view)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'): break
 
     cap.release()
     cv2.destroyAllWindows()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
