@@ -134,7 +134,6 @@ def detect_players_motion_only(fg_mask, court_polygon, min_area=300):
     final_players = [box for box in players if (box[2] * box[3]) > 500]
 
     return final_players
-
 def detect_ball(frame, hsv_frame, fg_mask, court_polygon):
     if court_polygon is None:
         return None
@@ -150,14 +149,27 @@ def detect_ball(frame, hsv_frame, fg_mask, court_polygon):
     best_candidate = None
     highest_score = -1
 
+    # 🔐 Skorbord bölgesi (sol alt)
+    SKORBOARD_REGION = (0, frame.shape[0] - 100, 200, 100)
+
     for c in all_contours:
         area = cv2.contourArea(c)
-        if area < 15 or area > 350:
+        if area < 20 or area > 150:
             continue
 
         (x, y, w, h) = cv2.boundingRect(c)
 
+        # 🎯 Skorbord kutusunu tamamen dışla
+        if (SKORBOARD_REGION[0] <= x <= SKORBOARD_REGION[0] + SKORBOARD_REGION[2] and
+            SKORBOARD_REGION[1] <= y <= SKORBOARD_REGION[1] + SKORBOARD_REGION[3]):
+            continue
+
         if cv2.pointPolygonTest(court_polygon, (x + w // 2, y + h // 2), False) < 0:
+            continue
+
+        roi_motion_mask = fg_mask[y:y + h, x:x + w]
+        motion_ratio = cv2.countNonZero(roi_motion_mask) / (w * h + 1e-6)
+        if motion_ratio < 0.05:
             continue
 
         aspect_ratio = w / float(h) if h > 0 else 0
@@ -165,12 +177,8 @@ def detect_ball(frame, hsv_frame, fg_mask, court_polygon):
 
         roi_color_mask = color_mask[y:y + h, x:x + w]
         color_ratio = cv2.countNonZero(roi_color_mask) / (w * h + 1e-6)
-
         if color_ratio < (np.mean(color_mask) / 255) * 0.5:
             continue
-
-        roi_motion_mask = fg_mask[y:y + h, x:x + w]
-        motion_ratio = cv2.countNonZero(roi_motion_mask) / (w * h + 1e-6)
 
         final_score = shape_score * color_ratio * (motion_ratio + 0.1)
 
@@ -182,6 +190,7 @@ def detect_ball(frame, hsv_frame, fg_mask, court_polygon):
         return best_candidate
     else:
         return None
+
 
 def main(debug=False):
     video_path = 'tennis.mp4'
