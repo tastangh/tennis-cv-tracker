@@ -21,7 +21,8 @@ class KalmanTracker:
         self.total_visible_count = 1
         self.consecutive_invisible_count = 0
         # --- YENİ ---
-        self.court_side = None # Oyuncunun kortun hangi tarafında olduğunu saklar ('top' veya 'bottom')
+        # Oyuncunun kortun hangi tarafında olduğunu saklar ('top' veya 'bottom')
+        self.court_side = None
         # --- /YENİ ---
 
     def predict(self):
@@ -142,6 +143,11 @@ def detect_players_motion_only(fg_mask, court_polygon, min_area=300):
         if w > h * 1.5 or h > w * 8:
             continue
         candidate_boxes.append((x, y, w, h))
+    # En büyük 2 tespiti alarak gürültüyü azalt (en olası 2 oyuncu)
+    if len(candidate_boxes) > 2:
+        candidate_boxes.sort(key=lambda box: box[2] * box[3], reverse=True)
+        candidate_boxes = candidate_boxes[:2]
+
     players = merge_overlapping_boxes(candidate_boxes, proximity_thresh=50)
     return [box for box in players if (box[2] * box[3]) > 500]
 
@@ -171,7 +177,7 @@ def get_court_side(box, homography_matrix, court_center_y):
     # Oyuncunun yerdeki konumunu en iyi ayaklarının olduğu nokta temsil eder.
     foot_point = np.array([[[x + w / 2, y + h]]], dtype=np.float32)
     transformed_point = cv2.perspectiveTransform(foot_point, homography_matrix)
-    if transformed_point is None:
+    if transformed_point is None or transformed_point.size == 0:
         return None
     
     ty = transformed_point[0][0][1]
@@ -199,7 +205,8 @@ def main(debug=False):
     top_down_width, top_down_height = 400, 800
     dst_points = np.array([[0, 0], [top_down_width - 1, 0], [top_down_width - 1, top_down_height - 1], [0, top_down_height - 1]], dtype=np.float32)
     # --- YENİ ---
-    court_center_y_top_down = top_down_height / 2 # Kuş bakışı kortun orta çizgisi
+    # Kuş bakışı kortun merkez çizgisinin Y koordinatı (filenin olduğu yer)
+    court_center_y_top_down = top_down_height / 2
     # --- /YENİ ---
     
     print("İşlem başlıyor...")
@@ -250,9 +257,11 @@ def main(debug=False):
             top_side_trackers = []
             bottom_side_trackers = []
             for i, trk in enumerate(player_trackers):
-                # Bir takipçinin sahasını ilk kez veya değiştiğinde belirle
-                if trk.court_side is None:
-                    trk.court_side = get_court_side(trk.box, homography_matrix, court_center_y_top_down)
+                # Bir takipçinin sahasını belirle
+                side = get_court_side(trk.box, homography_matrix, court_center_y_top_down)
+                # Sadece ilk kez veya geçerli bir saha bilgisi aldığında güncelle
+                if side is not None:
+                    trk.court_side = side
                 
                 if trk.court_side == 'top':
                     top_side_trackers.append((i, trk))
@@ -261,19 +270,21 @@ def main(debug=False):
 
             top_side_detections = []
             bottom_side_detections = []
+            unassigned_detections = []
             for i, det in enumerate(player_detections):
                 side = get_court_side(det, homography_matrix, court_center_y_top_down)
                 if side == 'top':
                     top_side_detections.append((i, det))
                 elif side == 'bottom':
                     bottom_side_detections.append((i, det))
+                else: # Sahası belirlenemeyen tespitler
+                    unassigned_detections.append((i, det))
 
-            # Eşleştirme işlemini her saha için ayrı ayrı yap
             updated_trackers_indices = set()
+            assigned_detections_indices = set()
             
             # --- Üst Saha Eşleştirmesi ---
             if top_side_trackers and top_side_detections:
-                # Sadece üst sahadaki takipçiler ve tespitler arasında mesafe hesapla
                 pairings = []
                 for trk_idx, tracker in top_side_trackers:
                     for det_idx, detection in top_side_detections:
@@ -284,12 +295,11 @@ def main(debug=False):
                 
                 pairings.sort() # Mesafeye göre sırala
                 
-                assigned_detections = set()
                 for dist, trk_idx, det_idx in pairings:
-                    if trk_idx not in updated_trackers_indices and det_idx not in assigned_detections:
+                    if trk_idx not in updated_trackers_indices and det_idx not in assigned_detections_indices:
                         player_trackers[trk_idx].update(player_detections[det_idx])
                         updated_trackers_indices.add(trk_idx)
-                        assigned_detections.add(det_idx)
+                        assigned_detections_indices.add(det_idx)
 
             # --- Alt Saha Eşleştirmesi ---
             if bottom_side_trackers and bottom_side_detections:
@@ -303,26 +313,30 @@ def main(debug=False):
                 
                 pairings.sort()
                 
-                assigned_detections = set()
                 for dist, trk_idx, det_idx in pairings:
-                    if trk_idx not in updated_trackers_indices and det_idx not in assigned_detections:
+                    if trk_idx not in updated_trackers_indices and det_idx not in assigned_detections_indices:
                         player_trackers[trk_idx].update(player_detections[det_idx])
                         updated_trackers_indices.add(trk_idx)
-                        assigned_detections.add(det_idx)
+                        assigned_detections_indices.add(det_idx)
 
-        # 3. Yeni Oyuncu Ekleme: Eğer 2'den az oyuncu varsa ve sahası boşsa ekle.
-        # Bu kısım, mevcut takipçilerin sahalarını kontrol ederek daha akıllı hale getirildi.
-        if len(player_trackers) < 2:
+            # 3. Yeni Oyuncu Ekleme: Boş bir sahada eşleşmemiş bir tespit varsa yeni takipçi oluştur.
             existing_sides = {t.court_side for t in player_trackers}
-            unassigned_detections = [d for d in player_detections if get_court_side(d, homography_matrix, court_center_y_top_down) not in existing_sides]
+            unassigned_detections = [
+                player_detections[i] for i in range(len(player_detections)) 
+                if i not in assigned_detections_indices
+            ]
             
             for det in unassigned_detections:
-                if len(player_trackers) < 2:
+                if len(player_trackers) >= 2:
+                    break 
+                
+                det_side = get_court_side(det, homography_matrix, court_center_y_top_down)
+                if det_side is not None and det_side not in existing_sides:
                     new_tracker = KalmanTracker(det)
-                    new_tracker.court_side = get_court_side(det, homography_matrix, court_center_y_top_down)
-                    if new_tracker.court_side not in existing_sides:
-                         player_trackers.append(new_tracker)
-                         existing_sides.add(new_tracker.court_side)
+                    new_tracker.court_side = det_side
+                    player_trackers.append(new_tracker)
+                    existing_sides.add(new_tracker.court_side)
+
 
         # 4. Temizlik: Uzun süredir görünmeyen izleyicileri kaldır (Değişiklik yok)
         player_trackers = [t for t in player_trackers if t.consecutive_invisible_count < 25]
@@ -339,23 +353,31 @@ def main(debug=False):
         
         for i, tracker in enumerate(player_trackers):
             x, y, w, h = map(int, tracker.box)
-            color = (0, 255, 0) if i == 0 else (255, 100, 0) # Oyunculara farklı renkler
+            # Sahaya göre renk belirle
+            if tracker.court_side == 'top':
+                color = (0, 255, 0) # Üstteki oyuncu yeşil
+            elif tracker.court_side == 'bottom':
+                 color = (255, 100, 0) # Alttaki oyuncu mavi
+            else:
+                color = (0, 0, 255) # Sahası belirsizse kırmızı
+
+            player_label = "P_Top" if tracker.court_side == 'top' else "P_Bottom"
             cv2.rectangle(display_frame, (x, y), (x+w, y+h), color, 2)
-            cv2.putText(display_frame, f"P{i+1}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            cv2.putText(display_frame, player_label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             
             if homography_matrix is not None:
                 player_foot_point = np.array([[[x + w/2, y + h]]], dtype=np.float32)
                 transformed_point = cv2.perspectiveTransform(player_foot_point, homography_matrix)
-                if transformed_point is not None:
+                if transformed_point is not None and transformed_point.size > 0:
                     tx, ty = int(transformed_point[0][0][0]), int(transformed_point[0][0][1])
                     cv2.circle(top_down_court_grid, (tx, ty), 12, color, -1)
-                    cv2.putText(top_down_court_grid, f"P{i+1}", (tx + 15, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                    cv2.putText(top_down_court_grid, player_label, (tx - 50, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
         cv2.imshow("Tenis Analizi", display_frame)
         cv2.imshow("Kuş Bakışı Kort (Gridli)", top_down_court_grid)
         if debug:
             cv2.imshow("Odaklanmış Kare", focused_frame)
-            cv2.imshow("Hareket Maskesi (Ham)", fg_mask)
+            cv2.imshow("Hareket Maskesi", fg_mask)
         
         frame_counter += 1
         if cv2.waitKey(1) & 0xFF == ord('q'): break
