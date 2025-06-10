@@ -107,6 +107,7 @@ def merge_overlapping_boxes(boxes, proximity_thresh=50):
             i += 1
             if merged: break
     return boxes
+
 def detect_players_motion_only(fg_mask, court_polygon, min_area=300):
     if court_polygon is None: return []
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -234,8 +235,7 @@ def main(debug=False):
     INVALID_VIEW_THRESHOLD = 5
     COURT_TOP_PADDING_PIXELS = 30; COURT_HORIZONTAL_PADDING_PIXELS = 20
     ball_params = { 'MIN_BALL_CONTOUR_AREA': 8, 'MAX_BALL_CONTOUR_AREA': 100, 'BALL_MIN_WIDTH_HEIGHT': 3, 'BALL_MAX_WIDTH_HEIGHT': 25, 'BALL_MIN_ASPECT_RATIO': 0.7, 'BALL_MAX_ASPECT_RATIO': 1.4, 'BALL_MIN_SOLIDITY': 0.75, 'MAX_BALL_LOST_FRAMES': 10, 'MAX_BALL_JUMP_DISTANCE': 80, 'SEARCH_REGION_PADDING': 50 }
-    viz_params = { 'player_viz_colors': {0:(0,100,255), 1:(255,100,0)}, 'player_viz_colors_lost': {0:(0,60,150), 1:(150,60,0)}, 'ball_viz_color':(0,255,255), 'SKETCH_BALL_HISTORY_LEN': 7, 'BALL_FADE_DURATION_SKETCH': 12 }
-    
+    viz_params = { 'player_viz_colors': {0:(255, 0, 255), 1:(128, 0, 0)}, 'player_viz_colors_lost': {0:(160, 0, 160), 1:(80, 0, 0)}, 'ball_viz_color':(0, 255, 0), 'SKETCH_BALL_HISTORY_LEN': 7, 'BALL_FADE_DURATION_SKETCH': 12 }    
     KROKI_IMAGE_PATH = "kort.png"; TARGET_SKETCH_WIDTH, TARGET_SKETCH_HEIGHT = 250, 430
     base_sketch_resized = None
     if os.path.exists(KROKI_IMAGE_PATH): base_sketch_resized = cv2.resize(cv2.imread(KROKI_IMAGE_PATH), (TARGET_SKETCH_WIDTH, TARGET_SKETCH_HEIGHT))
