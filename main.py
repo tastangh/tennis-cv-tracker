@@ -5,6 +5,7 @@ import numpy as np
 import cv2
 import math
 import os
+from collections import deque
 
 # --- KalmanTracker Sınıfı (Değişiklik Yok) ---
 class KalmanTracker:
@@ -84,6 +85,7 @@ def merge_overlapping_boxes(boxes, proximity_thresh=50):
             i += 1
             if merged: break
     return boxes
+
 def detect_players_motion_only(fg_mask, court_polygon, min_area=300):
     if court_polygon is None: return []
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -99,24 +101,71 @@ def detect_players_motion_only(fg_mask, court_polygon, min_area=300):
         candidate_boxes.sort(key=lambda box: box[2] * box[3], reverse=True); candidate_boxes = candidate_boxes[:2]
     players = merge_overlapping_boxes(candidate_boxes, proximity_thresh=50)
     return [box for box in players if (box[2] * box[3]) > 500]
+
 def draw_grid(image, grid_shape=(12, 6)):
     h, w, _ = image.shape; rows, cols = grid_shape; dy, dx = h / rows, w / cols
     for x in np.linspace(start=dx, stop=w-dx, num=cols-1): cv2.line(image, (int(round(x)), 0), (int(round(x)), h), color=(255, 255, 255), thickness=1, lineType=cv2.LINE_AA)
     for y in np.linspace(start=dy, stop=h-dy, num=rows-1): cv2.line(image, (0, int(round(y))), (w, int(round(y))), color=(255, 255, 255), thickness=1, lineType=cv2.LINE_AA)
     return image
+
 def get_court_side(box, homography_matrix, court_center_y):
     if homography_matrix is None: return None
     x, y, w, h = box; foot_point = np.array([[[x + w / 2, y + h]]], dtype=np.float32)
     transformed_point = cv2.perspectiveTransform(foot_point, homography_matrix)
     if transformed_point is None or transformed_point.size == 0: return None
     return "top" if transformed_point[0][0][1] < court_center_y else "bottom"
+
 def get_top_down_coords(box, homography_matrix):
     if homography_matrix is None: return None, None
     x, y, w, h = map(int, box); foot_point = np.array([[[x + w/2, y + h]]], dtype=np.float32)
     transformed_point = cv2.perspectiveTransform(foot_point, homography_matrix)
     if transformed_point is not None and transformed_point.size > 0: return int(transformed_point[0][0][0]), int(transformed_point[0][0][1])
     return None, None
-    
+
+def get_valid_contours(fg_mask, min_area, max_area):
+    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return [cnt for cnt in contours if min_area < cv2.contourArea(cnt) < max_area]
+
+def is_point_inside_bbox(point, bbox):
+    x_p, y_p = point; x_b, y_b, w_b, h_b = bbox
+    return x_b < x_p < x_b + w_b and y_b < y_p < y_b + h_b
+
+def detect_ball(fg_mask, last_known_ball_center, ball_lost_counter, court_boundary_points, player_bboxes, params):
+    if last_known_ball_center and ball_lost_counter < params['MAX_BALL_LOST_FRAMES']:
+        search_mask = np.zeros_like(fg_mask)
+        sx = int(last_known_ball_center[0] - params['SEARCH_REGION_PADDING']); sy = int(last_known_ball_center[1] - params['SEARCH_REGION_PADDING'])
+        sw = int(params['SEARCH_REGION_PADDING'] * 2); sh = int(params['SEARCH_REGION_PADDING'] * 2)
+        cv2.rectangle(search_mask, (sx, sy), (sx + sw, sy + sh), 255, -1)
+        search_area = cv2.bitwise_and(fg_mask, fg_mask, mask=search_mask)
+    else:
+        search_area = fg_mask
+    contours = get_valid_contours(search_area, params['MIN_BALL_CONTOUR_AREA'], params['MAX_BALL_CONTOUR_AREA'])
+    potential_balls = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if not (params['BALL_MIN_WIDTH_HEIGHT'] <= w <= params['BALL_MAX_WIDTH_HEIGHT'] and params['BALL_MIN_WIDTH_HEIGHT'] <= h <= params['BALL_MAX_WIDTH_HEIGHT']): continue
+        aspect_ratio = w / float(h) if h > 0 else 0
+        if not (params['BALL_MIN_ASPECT_RATIO'] <= aspect_ratio <= params['BALL_MAX_ASPECT_RATIO']): continue
+        area = cv2.contourArea(cnt)
+        if len(cnt) >= 5:
+            if (float(area) / cv2.contourArea(cv2.convexHull(cnt))) < params['BALL_MIN_SOLIDITY']: continue
+        center_candidate = (x + w // 2, y + h // 2)
+        if cv2.pointPolygonTest(court_boundary_points, center_candidate, False) < 0: continue
+        if any(is_point_inside_bbox(center_candidate, p_bbox) for p_bbox in player_bboxes): continue
+        potential_balls.append({'bbox': (x, y, w, h), 'center': center_candidate, 'area': area})
+    if not potential_balls: return None
+    best_ball = None
+    if last_known_ball_center and ball_lost_counter < params['MAX_BALL_LOST_FRAMES']:
+        min_dist = float('inf')
+        for ball in potential_balls:
+            dist = np.linalg.norm(np.array(last_known_ball_center) - np.array(ball['center']))
+            if dist < params['MAX_BALL_JUMP_DISTANCE'] and dist < min_dist:
+                min_dist = dist; best_ball = ball
+    if best_ball is None:
+        potential_balls.sort(key=lambda b: b['area'], reverse=True)
+        best_ball = potential_balls[0]
+    return (best_ball['bbox'], best_ball['center'])
+
 # --- Ana Fonksiyon ---
 def main(debug=False):
     video_path = 'tennis.mp4'
@@ -128,16 +177,24 @@ def main(debug=False):
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
     # --- AYARLANABİLİR PARAMETRELER ---
-    TOP_BOTTOM_RATIO_RANGE = (0.3, 0.98) 
-    ASPECT_RATIO_RANGE = (1.0, 2.5)     
-    INVALID_VIEW_THRESHOLD = 5          
-    COURT_TOP_PADDING_PIXELS = 30
-    COURT_HORIZONTAL_PADDING_PIXELS = 20 # Yatay genişletme miktarı
+    TOP_BOTTOM_RATIO_RANGE = (0.3, 0.98); ASPECT_RATIO_RANGE = (1.0, 2.5)
+    INVALID_VIEW_THRESHOLD = 5; COURT_TOP_PADDING_PIXELS = 30; COURT_HORIZONTAL_PADDING_PIXELS = 20
+    ball_params = {
+        'MIN_BALL_CONTOUR_AREA': 8, 'MAX_BALL_CONTOUR_AREA': 100,
+        'BALL_MIN_WIDTH_HEIGHT': 3, 'BALL_MAX_WIDTH_HEIGHT': 25,
+        'BALL_MIN_ASPECT_RATIO': 0.7, 'BALL_MAX_ASPECT_RATIO': 1.4,
+        'BALL_MIN_SOLIDITY': 0.75,
+        'MAX_BALL_LOST_FRAMES': 10, 'MAX_BALL_JUMP_DISTANCE': 80,
+        'SEARCH_REGION_PADDING': 50, 'BALL_TRAIL_LENGTH': 10
+    }
     
     bg_subtractor = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=16, detectShadows=False)
     
     last_known_corners, is_court_view_active, invalid_view_counter = None, True, 0
     player_trackers, homography_matrix = [], None
+    last_known_ball_center, ball_lost_counter = None, 0
+    ball_trail = deque(maxlen=ball_params['BALL_TRAIL_LENGTH'])
+
     top_down_width, top_down_height = 400, 800
     dst_points = np.array([[0, 0], [top_down_width-1, 0], [top_down_width-1, top_down_height-1], [0, top_down_height-1]], dtype=np.float32)
     court_center_y_top_down = top_down_height / 2
@@ -174,20 +231,18 @@ def main(debug=False):
         if is_court_view_active: status_text, status_color = "Kort Tam Istenen Acida", (0, 255, 0)
         else: status_text, status_color = "Kort Aci Kontrolu Basarisiz (Replay?)", (0, 0, 255)
 
+        detected_ball_info = None
         if is_court_view_active and last_known_corners is not None:
-            # --- KÖŞE GENİŞLETME MANTIĞI ---
-            padded_corners = np.copy(last_known_corners)
-            y_indices = np.argsort(padded_corners[:, 1]); x_indices = np.argsort(padded_corners[:, 0])
-            padded_corners[y_indices[:2], 1] -= COURT_TOP_PADDING_PIXELS      # Dikey genişletme
-            padded_corners[x_indices[:2], 0] -= COURT_HORIZONTAL_PADDING_PIXELS # Yatay genişletme (sol)
-            padded_corners[x_indices[2:], 0] += COURT_HORIZONTAL_PADDING_PIXELS # Yatay genişletme (sağ)
-
-            play_area_mask = np.zeros(frame.shape[:2], dtype=np.uint8); cv2.drawContours(play_area_mask, [cv2.convexHull(padded_corners)], -1, 255, -1)
-            
+            padded_corners = np.copy(last_known_corners); y_indices = np.argsort(padded_corners[:, 1]); x_indices = np.argsort(padded_corners[:, 0])
+            padded_corners[y_indices[:2], 1] -= COURT_TOP_PADDING_PIXELS; padded_corners[x_indices[:2], 0] -= COURT_HORIZONTAL_PADDING_PIXELS; padded_corners[x_indices[2:], 0] += COURT_HORIZONTAL_PADDING_PIXELS
+            court_polygon = cv2.convexHull(padded_corners)
+            play_area_mask = np.zeros(frame.shape[:2], dtype=np.uint8); cv2.drawContours(play_area_mask, [court_polygon], -1, 255, -1)
             blurred_frame = cv2.GaussianBlur(frame, (5, 5), 0)
             fg_mask_raw = bg_subtractor.apply(blurred_frame, learningRate=0.005)
             fg_mask_court_only = cv2.bitwise_and(fg_mask_raw, fg_mask_raw, mask=play_area_mask)
-            player_detections = detect_players_motion_only(fg_mask_court_only, cv2.convexHull(padded_corners))
+            
+            # --- OYUNCU TAKİBİ (Düzeltildi ve geri eklendi) ---
+            player_detections = detect_players_motion_only(fg_mask_court_only, court_polygon)
             for t in player_trackers: t.predict()
             if homography_matrix is not None:
                 top_side_trackers, bottom_side_trackers, top_side_detections, bottom_side_detections = [], [], [], []
@@ -215,36 +270,56 @@ def main(debug=False):
                     det_side = get_court_side(det, homography_matrix, court_center_y_top_down)
                     if det_side and det_side not in existing_sides:
                         new_tracker = KalmanTracker(det); new_tracker.court_side = det_side; player_trackers.append(new_tracker); existing_sides.add(det_side)
-        
+            
+            # --- TOP TESPİTİ ---
+            player_bboxes = [t.box for t in player_trackers]
+            detected_ball_info = detect_ball(fg_mask_court_only, last_known_ball_center, ball_lost_counter, cv2.convexHull(last_known_corners), player_bboxes, ball_params)
+            if detected_ball_info:
+                last_known_ball_center = detected_ball_info[1]; ball_lost_counter = 0; ball_trail.append(last_known_ball_center)
+            else:
+                ball_lost_counter += 1
+                if ball_lost_counter > ball_params['MAX_BALL_LOST_FRAMES']: last_known_ball_center = None; ball_trail.clear()
+        else:
+            ball_lost_counter += 1
+            if ball_lost_counter > ball_params['MAX_BALL_LOST_FRAMES']: last_known_ball_center = None; ball_trail.clear()
+
         player_trackers = [t for t in player_trackers if t.consecutive_invisible_count < 50]
 
+        # --- GÖRSELLEŞTİRME ---
         display_frame = frame.copy()
         top_down_court_grid = np.zeros((top_down_height, top_down_width, 3), dtype=np.uint8); top_down_court_grid = draw_grid(top_down_court_grid)
 
         if is_court_view_active and last_known_corners is not None:
-            # Görselleştirme için de aynı genişletme mantığını kullan
-            padded_corners_viz = np.copy(last_known_corners)
-            y_indices_viz = np.argsort(padded_corners_viz[:, 1]); x_indices_viz = np.argsort(padded_corners_viz[:, 0])
-            padded_corners_viz[y_indices_viz[:2], 1] -= COURT_TOP_PADDING_PIXELS
-            padded_corners_viz[x_indices_viz[:2], 0] -= COURT_HORIZONTAL_PADDING_PIXELS
-            padded_corners_viz[x_indices_viz[2:], 0] += COURT_HORIZONTAL_PADDING_PIXELS
-            
+            padded_corners_viz = np.copy(last_known_corners); y_indices_viz = np.argsort(padded_corners_viz[:, 1]); x_indices_viz = np.argsort(padded_corners_viz[:, 0])
+            padded_corners_viz[y_indices_viz[:2], 1] -= COURT_TOP_PADDING_PIXELS; padded_corners_viz[x_indices_viz[:2], 0] -= COURT_HORIZONTAL_PADDING_PIXELS; padded_corners_viz[x_indices_viz[2:], 0] += COURT_HORIZONTAL_PADDING_PIXELS
             viz_mask = np.zeros(frame.shape[:2], dtype=np.uint8); cv2.drawContours(viz_mask, [cv2.convexHull(padded_corners_viz)], -1, 255, -1)
-            viz_mask_bgr = cv2.cvtColor(viz_mask, cv2.COLOR_GRAY2BGR)
-            cv2.addWeighted(viz_mask_bgr, 0.3, display_frame, 0.7, 0, display_frame)
+            viz_mask_bgr = cv2.cvtColor(viz_mask, cv2.COLOR_GRAY2BGR); cv2.addWeighted(viz_mask_bgr, 0.3, display_frame, 0.7, 0, display_frame)
             
         cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 3)
         cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
             
         if is_court_view_active:
+            # Oyuncuları Çiz
             for tracker in player_trackers:
                 x, y, w_box, h_box = map(int, tracker.box)
                 color, label = ((0, 255, 0), "P_Top") if tracker.court_side == 'top' else (((255, 100, 0), "P_Bottom") if tracker.court_side == 'bottom' else ((0, 0, 255), "P_Unknown"))
                 cv2.rectangle(display_frame, (x, y), (x+w_box, y+h_box), color, 2); cv2.putText(display_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                 tx, ty = get_top_down_coords(tracker.box, homography_matrix)
-                if tx is not None: 
-                    cv2.circle(top_down_court_grid, (tx, ty), 12, color, -1); 
-                    cv2.putText(top_down_court_grid, label, (tx - 50, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                if tx is not None: cv2.circle(top_down_court_grid, (tx, ty), 12, color, -1); cv2.putText(top_down_court_grid, label, (tx - 50, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+            
+            # Topu ve İzini Çiz
+            if detected_ball_info:
+                ball_bbox, ball_center = detected_ball_info
+                cv2.circle(display_frame, ball_center, 8, (0, 255, 255), -1) # Parlak Sarı Top
+                
+            for i, pos in enumerate(ball_trail):
+                if pos is None: continue
+                tx, ty = get_top_down_coords((pos[0], pos[1], 0, 0), homography_matrix)
+                if tx is not None:
+                    opacity = (i + 1) / len(ball_trail)
+                    color = (0, int(255 * opacity), int(255 * opacity))
+                    radius = 2 + int(2 * opacity)
+                    cv2.circle(top_down_court_grid, (tx, ty), radius, color, -1)
 
         cv2.imshow("Tenis Analizi", display_frame); cv2.imshow("Kuş Bakışı Kort", top_down_court_grid)
         if debug and is_court_view_active and 'fg_mask_court_only' in locals():
