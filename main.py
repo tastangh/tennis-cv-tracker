@@ -40,6 +40,8 @@ class KalmanTracker:
         self.total_visible_count += 1
         self.consecutive_invisible_count = 0
 
+# --- Diğer yardımcı fonksiyonlar (detect_court_in_roi, merge_overlapping_boxes, detect_players_motion_only, draw_grid) ---
+# ... (Bu fonksiyonlar bir önceki cevapla aynı olduğu için yer kaplamaması adına kesilmiştir. Kodunuza aynen ekleyin.)
 def detect_court_in_roi(roi_frame):
     gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
@@ -122,42 +124,38 @@ def merge_overlapping_boxes(boxes, proximity_thresh=50):
                 break
     return boxes
 
-def is_camera_moving(prev_gray, current_gray, motion_threshold=0.6):
-    if prev_gray is None: return False, 0.0
-    flow = cv2.calcOpticalFlowFarneback(prev_gray, current_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-    magnitude, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-    mean_magnitude = np.mean(magnitude)
-    return mean_magnitude > motion_threshold, mean_magnitude
-
-def get_detections(processed_mask):
-    # Artık kort poligonuna gerek yok, çünkü maske zaten odaklanmış.
+def detect_players_motion_only(fg_mask, court_polygon, min_area=300):
+    if court_polygon is None: return []
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    processed_mask = cv2.dilate(fg_mask, kernel, iterations=2)
+    processed_mask = cv2.erode(processed_mask, kernel, iterations=1)
     contours, _ = cv2.findContours(processed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    player_candidates, ball_candidates = [], []
+    candidate_boxes = []
     for c in contours:
-        area = cv2.contourArea(c)
-        x, y, w, h = cv2.boundingRect(c)
-        if h <= 0: continue
-        aspect_ratio = w/h
-        # Filtreleri biraz daha genel tutabiliriz, çünkü gürültü azaldı.
-        if 800 < area < 20000 and aspect_ratio < 1.5 and h > w:
-            player_candidates.append((x, y, w, h))
-        elif 15 < area < 400 and 0.6 < aspect_ratio < 1.5:
-            ball_candidates.append((x, y, w, h))
-    return merge_overlapping_boxes(player_candidates), ball_candidates
+        (x, y, w, h) = cv2.boundingRect(c)
+        if cv2.pointPolygonTest(court_polygon, (x + w // 2, y + h // 2), False) < 0:
+            continue
+        if cv2.contourArea(c) < min_area:
+            continue
+        if w > h * 1.5 or h > w * 8:
+            continue
+        candidate_boxes.append((x, y, w, h))
+    players = merge_overlapping_boxes(candidate_boxes, proximity_thresh=50)
+    return [box for box in players if (box[2] * box[3]) > 500]
 
-def draw_grid(image, grid_shape=(12, 6)): # Daha geniş bir grid
+def draw_grid(image, grid_shape=(12, 6)):
     h, w, _ = image.shape
     rows, cols = grid_shape
     dy, dx = h / rows, w / cols
-    # Dikey çizgiler
     for x in np.linspace(start=dx, stop=w-dx, num=cols-1):
         x = int(round(x))
         cv2.line(image, (x, 0), (x, h), color=(255, 255, 255), thickness=1, lineType=cv2.LINE_AA)
-    # Yatay çizgiler
     for y in np.linspace(start=dy, stop=h-dy, num=rows-1):
         y = int(round(y))
         cv2.line(image, (0, y), (w, y), color=(255, 255, 255), thickness=1, lineType=cv2.LINE_AA)
     return image
+# --- Diğer yardımcı fonksiyonların sonu ---
+
 
 def main(debug=False):
     video_path = 'tennis.mp4'
@@ -185,8 +183,8 @@ def main(debug=False):
         if not ret: break
         frame = cv2.resize(frame, (target_width, target_height))
 
-        # Adım 1: Kort Tespiti ve Homografi
-        # (Kamera hareketi kontrolü basitlik için kaldırıldı, statik kamera varsayılıyor)
+        # Adım 1 & 2: Kort Tespiti, Homografi ve Odaklanmış Maske
+        # (Bu kısımlarda değişiklik yok)
         if last_known_corners is None or frame_counter % 60 == 0:
             h, w, _ = frame.shape
             roi = frame[int(h*0.2):, :]
@@ -201,77 +199,99 @@ def main(debug=False):
                 homography_matrix, _ = cv2.findHomography(src_points, dst_points)
 
         if last_known_corners is None:
-            cv2.imshow("Tenis Analizi", frame)
+            cv2.imshow("Tenis Analizi - Kort Aranıyor...", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'): break
             continue
 
-        # --- YENİ ADIM 2: ODAKLANMIŞ MASKELEME ---
-        # 2a. Genişletilmiş bir "Oyun Alanı" maskesi oluştur
         play_area_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-        # Kort poligonunu biraz genişlet (dilate)
-        dilated_corners = cv2.convexHull(last_known_corners) # Dış bükey bir alan oluştur
+        dilated_corners = cv2.convexHull(last_known_corners)
         cv2.drawContours(play_area_mask, [dilated_corners], -1, 255, -1)
-        # Morfolojik olarak daha da genişletelim
         play_area_mask = cv2.dilate(play_area_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (50, 50)), iterations=1)
-
-        # 2b. Orijinal karenin kort dışı alanlarını bulanıklaştır
         blurred_frame = cv2.GaussianBlur(frame, (21, 21), 0)
-        # Oyun alanını orijinalden, geri kalanını bulanık olandan al
         focused_frame = np.where(play_area_mask[:, :, None] == 255, frame, blurred_frame)
 
-        # 2c. Arka Plan Çıkarıcıyı bu odaklanmış kareye uygula
+        # Adım 3: Arka Plan Çıkarma ve Oyuncu Tespiti
         fg_mask = bg_subtractor.apply(focused_frame, learningRate=0.005)
+        player_detections = detect_players_motion_only(fg_mask, last_known_corners)
         
-        # Adım 3: Hareket Maskesini İşle
-        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (10, 10))
-        processed_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, close_kernel)
-        
-        # Adım 4 & 5: Tespit ve Takip (Kalman)
-        player_detections, _ = get_detections(processed_mask) # Şimdilik sadece oyuncular
-        
-        if player_trackers:
-            for t in player_trackers: t.predict()
-        unmatched_detections_indices = list(range(len(player_detections)))
-        for tracker in player_trackers:
-            min_dist, best_match_idx = float('inf'), -1
-            for j in unmatched_detections_indices:
-                dist = np.linalg.norm(np.array(player_detections[j][:2]) - np.array(tracker.box[:2]))
-                if dist < 120 and dist < min_dist: # Arama penceresini biraz genişlet
-                    min_dist, best_match_idx = dist, j
-            if best_match_idx != -1:
-                tracker.update(player_detections[best_match_idx])
-                unmatched_detections_indices.remove(best_match_idx)
-        for idx in unmatched_detections_indices:
-             if len(player_trackers) < 2: player_trackers.append(KalmanTracker(player_detections[idx]))
-        player_trackers = [t for t in player_trackers if t.consecutive_invisible_count < 15]
+        # --- YENİ VE GELİŞTİRİLMİŞ TAKİP MANTIĞI ---
 
-        # Adım 6: Görselleştirme
+        # 1. Başlangıç Aşaması: Henüz 2 oyuncu izleyicimiz yoksa, yenilerini ekle.
+        if len(player_trackers) < 2:
+            for det in player_detections:
+                if len(player_trackers) < 2:
+                    player_trackers.append(KalmanTracker(det))
+        
+        # 2. Ana Takip Aşaması: Tam olarak 2 izleyicimiz varsa
+        if len(player_trackers) == 2:
+            # Önce her iki izleyici için de bir sonraki adımı TAHMİN ET.
+            # Atamayı bu tahmin edilen konumlara göre yapacağız.
+            for t in player_trackers:
+                t.predict()
+
+            # Eğer hiç tespit yoksa, bu karede kimseyi güncelleyemeyiz.
+            # `predict` adımı zaten çalıştı, bu yüzden konumları hala güncel.
+            if len(player_detections) > 0:
+                # Olası tüm (izleyici, tespit) çiftlerinin mesafelerini hesapla
+                pairings = []
+                for i, tracker in enumerate(player_trackers):
+                    for j, detection in enumerate(player_detections):
+                        # Tahmin edilen kutu merkezi ile tespit edilen kutu merkezi arasındaki mesafe
+                        tracker_pos = np.array(tracker.box[:2]) + np.array(tracker.box[2:]) / 2
+                        detection_pos = np.array(detection[:2]) + np.array(detection[2:]) / 2
+                        dist = np.linalg.norm(tracker_pos - detection_pos)
+                        pairings.append((i, j, dist))
+                
+                # Çiftleri mesafeye göre sırala (en iyi eşleşmeler en başta olacak)
+                pairings.sort(key=lambda x: x[2])
+                
+                # Atanan izleyicileri ve tespitleri takip etmek için setler kullan
+                assigned_trackers_idx = set()
+                assigned_detections_idx = set()
+                
+                # En iyi eşleşmeleri ata (greedy assignment)
+                for tracker_idx, detection_idx, dist in pairings:
+                    # Eğer bu izleyici ve tespit daha önce atanmadıysa
+                    if tracker_idx not in assigned_trackers_idx and detection_idx not in assigned_detections_idx:
+                        # Atamayı yap: izleyiciyi yeni tespit ile GÜNCELLE
+                        player_trackers[tracker_idx].update(player_detections[detection_idx])
+                        # Atandılar olarak işaretle
+                        assigned_trackers_idx.add(tracker_idx)
+                        assigned_detections_idx.add(detection_idx)
+        
+        # 3. Temizlik Aşaması: Uzun süredir görünmeyen izleyicileri kaldır.
+        # Bu, bir oyuncu kaybolduğunda sistemin yeni bir oyuncu bulmasına olanak tanır.
+        player_trackers = [t for t in player_trackers if t.consecutive_invisible_count < 25]
+
+        # --- GÖRSELLEŞTİRME (Değişiklik yok) ---
         display_frame = frame.copy()
-        cv2.addWeighted(cv2.cvtColor(play_area_mask, cv2.COLOR_GRAY2BGR), 0.3, display_frame, 0.7, 0, display_frame) # Oyun alanını göster
+        cv2.addWeighted(cv2.cvtColor(play_area_mask, cv2.COLOR_GRAY2BGR), 0.3, display_frame, 0.7, 0, display_frame)
 
         top_down_court_grid = np.zeros((top_down_height, top_down_width, 3), dtype=np.uint8)
         top_down_court_grid = draw_grid(top_down_court_grid)
 
-        visible_players = [t for t in player_trackers if t.total_visible_count > 3]
-        visible_players.sort(key=lambda t: t.box[1])
-        for i, tracker in enumerate(visible_players):
+        # Oyuncuları y-koordinatına göre sıralayarak P1 ve P2 atamasını kararlı hale getir
+        player_trackers.sort(key=lambda t: t.box[1]) 
+        
+        for i, tracker in enumerate(player_trackers):
             x, y, w, h = map(int, tracker.box)
-            cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            cv2.putText(display_frame, f"P{i+1}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            color = (0, 255, 0) if i == 0 else (255, 100, 0) # Oyunculara farklı renkler
+            cv2.rectangle(display_frame, (x, y), (x+w, y+h), color, 2)
+            cv2.putText(display_frame, f"P{i+1}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             
             if homography_matrix is not None:
                 player_foot_point = np.array([[[x + w/2, y + h]]], dtype=np.float32)
                 transformed_point = cv2.perspectiveTransform(player_foot_point, homography_matrix)
                 if transformed_point is not None:
                     tx, ty = int(transformed_point[0][0][0]), int(transformed_point[0][0][1])
-                    cv2.circle(top_down_court_grid, (tx, ty), 12, (0, 255, 0), -1)
-                    cv2.putText(top_down_court_grid, f"P{i+1}", (tx + 15, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.circle(top_down_court_grid, (tx, ty), 12, color, -1)
+                    cv2.putText(top_down_court_grid, f"P{i+1}", (tx + 15, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
         cv2.imshow("Tenis Analizi", display_frame)
         cv2.imshow("Kuş Bakışı Kort (Gridli)", top_down_court_grid)
         if debug:
             cv2.imshow("Odaklanmış Kare", focused_frame)
-            cv2.imshow("Hareket Maskesi", processed_mask)
+            cv2.imshow("Hareket Maskesi (Ham)", fg_mask)
         
         frame_counter += 1
         if cv2.waitKey(1) & 0xFF == ord('q'): break
@@ -281,4 +301,5 @@ def main(debug=False):
     print("İşlem tamamlandı.")
 
 if __name__ == "__main__":
+    # Önceki kodunuzdaki gibi, kesilen yardımcı fonksiyonları buraya veya yukarıya eklemeyi unutmayın.
     main(debug=True)
