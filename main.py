@@ -6,33 +6,23 @@ import cv2
 import math
 import os
 
-# --- KalmanTracker Sınıfı ---
+# --- KalmanTracker Sınıfı (Değişiklik Yok) ---
 class KalmanTracker:
     def __init__(self, initial_box):
-        self.kf = cv2.KalmanFilter(4, 2)
-        self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+        self.kf = cv2.KalmanFilter(4, 2); self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
         self.kf.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
-        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
-        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
-        x, y, w, h = initial_box
-        self.kf.statePost = np.array([x + w/2, y + h/2, 0, 0], np.float32).T
-        self.box = initial_box
-        self.age = 0
-        self.consecutive_invisible_count = 0
-        self.court_side = None
-
+        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03; self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
+        x, y, w, h = initial_box; self.kf.statePost = np.array([x + w/2, y + h/2, 0, 0], np.float32).T
+        self.box = initial_box; self.age = 0; self.consecutive_invisible_count = 0; self.court_side = None
     def predict(self):
         predicted_state = self.kf.predict(); self.age += 1; self.consecutive_invisible_count += 1
         predicted_x, predicted_y = int(predicted_state[0]), int(predicted_state[1])
-        w, h = self.box[2], self.box[3]; self.box = (predicted_x - w//2, predicted_y - h//2, w, h)
-        return self.box
-
+        w, h = self.box[2], self.box[3]; self.box = (predicted_x - w//2, predicted_y - h//2, w, h); return self.box
     def update(self, box):
-        x, y, w, h = box
-        measurement = np.array([[x + w/2], [y + h/2]], np.float32)
+        x, y, w, h = box; measurement = np.array([[x + w/2], [y + h/2]], np.float32)
         self.kf.correct(measurement); self.box = box; self.consecutive_invisible_count = 0
 
-# --- Yardımcı Fonksiyonlar ---
+# --- Yardımcı Fonksiyonlar (Değişiklik Yok) ---
 def detect_court_in_roi(roi_frame):
     gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)); enhanced_gray = clahe.apply(gray)
@@ -62,40 +52,21 @@ def detect_court_in_roi(roi_frame):
     if not all([tl, tr, bl, br]): return None
     return np.array([tl, tr, br, bl], dtype=np.int32)
 
-# --- YENİ YARDIMCI FONKSİYON ---
-def is_court_geometry_valid(corners):
-    """Tespit edilen kort köşelerinin geometrisinin geçerli bir oyun açısı olup olmadığını kontrol eder."""
-    if corners is None or len(corners) != 4:
-        return False
-    # Köşeleri sırala: tl, tr, bl, br
+def is_court_geometry_valid(corners, top_bottom_ratio_range, aspect_ratio_range):
+    if corners is None or len(corners) != 4: return False
     sorted_y = sorted(corners, key=lambda p: p[1])
-    top_corners = sorted(sorted_y[:2], key=lambda p: p[0])
-    bottom_corners = sorted(sorted_y[2:], key=lambda p: p[0])
+    top_corners = sorted(sorted_y[:2], key=lambda p: p[0]); bottom_corners = sorted(sorted_y[2:], key=lambda p: p[0])
     tl, tr, bl, br = top_corners[0], top_corners[1], bottom_corners[0], bottom_corners[1]
-
-    # Kenar uzunluklarını hesapla
-    top_width = np.linalg.norm(tl - tr)
-    bottom_width = np.linalg.norm(bl - br)
-    left_height = np.linalg.norm(tl - bl)
-    right_height = np.linalg.norm(tr - br)
-    
+    top_width = np.linalg.norm(tl - tr); bottom_width = np.linalg.norm(bl - br)
+    left_height = np.linalg.norm(tl - bl); right_height = np.linalg.norm(tr - br)
     if bottom_width < 1 or left_height < 1 or right_height < 1: return False
-
-    # 1. Oran Kontrolü: Üst kenar, alt kenardan daha kısa olmalı (perspektif kuralı)
-    # ama çok da kısa olmamalı (aşırı bozuk açıları elemek için).
     top_bottom_ratio = top_width / bottom_width
-    if not (0.2 < top_bottom_ratio < 0.98):
-        return False
-        
-    # 2. En-Boy Oranı Kontrolü: Kortun genel en-boy oranı makul olmalı.
+    if not (top_bottom_ratio_range[0] < top_bottom_ratio < top_bottom_ratio_range[1]): return False
     avg_height = (left_height + right_height) / 2
     aspect_ratio = bottom_width / avg_height
-    if not (0.8 < aspect_ratio < 2.5):
-        return False
-        
+    if not (aspect_ratio_range[0] < aspect_ratio < aspect_ratio_range[1]): return False
     return True
 
-# --- Diğer Yardımcı Fonksiyonlar (Değişiklik Yok) ---
 def merge_overlapping_boxes(boxes, proximity_thresh=50):
     if len(boxes) == 0: return []
     merged = True
@@ -151,19 +122,20 @@ def main(debug=False):
     video_path = 'tennis.mp4'
     if not os.path.exists(video_path): print(f"Hata: '{video_path}' bulunamadı."); return
     cap = cv2.VideoCapture(video_path)
-    target_width = 800
-    ret, test_frame = cap.read()
+    target_width = 800; ret, test_frame = cap.read()
     if not ret: print("Hata: Video dosyası okunamadı."); return
     scale = target_width / test_frame.shape[1]; target_height = int(test_frame.shape[0] * scale)
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
-    COURT_TOP_PADDING_PIXELS, INVALID_VIEW_THRESHOLD = 40, 15
+    TOP_BOTTOM_RATIO_RANGE = (0.3, 0.98); ASPECT_RATIO_RANGE = (1.0, 2.5)
+    INVALID_VIEW_THRESHOLD = 5; COURT_TOP_PADDING_PIXELS = 30
+    
     bg_subtractor = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=16, detectShadows=False)
     
     last_known_corners, is_court_view_active, invalid_view_counter = None, True, 0
     player_trackers, homography_matrix = [], None
     top_down_width, top_down_height = 400, 800
-    dst_points = np.array([[0, 0], [top_down_width - 1, 0], [top_down_width - 1, top_down_height - 1], [0, top_down_height - 1]], dtype=np.float32)
+    dst_points = np.array([[0, 0], [top_down_width-1, 0], [top_down_width-1, top_down_height-1], [0, top_down_height-1]], dtype=np.float32)
     court_center_y_top_down = top_down_height / 2
     
     status_text, status_color = "", (0, 0, 0)
@@ -174,15 +146,13 @@ def main(debug=False):
         if not ret: break
         frame = cv2.resize(frame, (target_width, target_height))
 
-        # 1. AÇI KONTROLÜ (HER KAREDE)
         h, w, _ = frame.shape; roi_for_check = frame[int(h*0.2):, :]
         current_corners_relative = detect_court_in_roi(roi_for_check)
         
         is_geometry_ok = False
         if current_corners_relative is not None:
-            # Geometriyi tam kare koordinatları üzerinde kontrol et
             current_corners_absolute = current_corners_relative + [0, int(h*0.2)]
-            if is_court_geometry_valid(current_corners_absolute):
+            if is_court_geometry_valid(current_corners_absolute, TOP_BOTTOM_RATIO_RANGE, ASPECT_RATIO_RANGE):
                 is_geometry_ok = True
 
         if is_geometry_ok:
@@ -197,28 +167,20 @@ def main(debug=False):
 
         if invalid_view_counter > INVALID_VIEW_THRESHOLD: is_court_view_active = False
 
-        # Durum metnini ve rengini ayarla
-        if is_court_view_active:
-            status_text, status_color = "Kort Tam Istenen Acida", (0, 255, 0)
-        else:
-            status_text, status_color = "Kort Aci Kontrolu Basarisiz (Replay?)", (0, 0, 255)
+        if is_court_view_active: status_text, status_color = "Kort Tam Istenen Acida", (0, 255, 0)
+        else: status_text, status_color = "Kort Aci Kontrolu Basarisiz (Replay?)", (0, 0, 255)
 
-        # 2. ANA İŞLEM (SADECE GEÇERLİ AÇIDA)
         if is_court_view_active and last_known_corners is not None:
             padded_corners = np.copy(last_known_corners); indices = np.argsort(padded_corners[:, 1])
             padded_corners[indices[:2], 1] -= COURT_TOP_PADDING_PIXELS
-            play_area_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-            cv2.drawContours(play_area_mask, [cv2.convexHull(padded_corners)], -1, 255, -1)
-
+            play_area_mask = np.zeros(frame.shape[:2], dtype=np.uint8); cv2.drawContours(play_area_mask, [cv2.convexHull(padded_corners)], -1, 255, -1)
             blurred_frame = cv2.GaussianBlur(frame, (5, 5), 0)
             fg_mask_raw = bg_subtractor.apply(blurred_frame, learningRate=0.005)
             fg_mask_court_only = cv2.bitwise_and(fg_mask_raw, fg_mask_raw, mask=play_area_mask)
             player_detections = detect_players_motion_only(fg_mask_court_only, cv2.convexHull(padded_corners))
-            
             for t in player_trackers: t.predict()
-            
             if homography_matrix is not None:
-                top_side_trackers, bottom_side_trackers = [], []; top_side_detections, bottom_side_detections = [], []
+                top_side_trackers, bottom_side_trackers, top_side_detections, bottom_side_detections = [], [], [], []
                 for i, trk in enumerate(player_trackers):
                     side = get_court_side(trk.box, homography_matrix, court_center_y_top_down)
                     if side is not None: trk.court_side = side
@@ -228,7 +190,6 @@ def main(debug=False):
                     side = get_court_side(det, homography_matrix, court_center_y_top_down)
                     if side == 'top': top_side_detections.append((i, det))
                     elif side == 'bottom': bottom_side_detections.append((i, det))
-
                 updated_trackers_indices, assigned_detections_indices = set(), set()
                 def match_in_side(trackers, detections):
                     if not trackers or not detections: return
@@ -237,7 +198,6 @@ def main(debug=False):
                         if trk_idx not in updated_trackers_indices and det_idx not in assigned_detections_indices:
                             player_trackers[trk_idx].update(player_detections[det_idx]); updated_trackers_indices.add(trk_idx); assigned_detections_indices.add(det_idx)
                 match_in_side(top_side_trackers, top_side_detections); match_in_side(bottom_side_trackers, bottom_side_detections)
-
                 existing_sides = {t.court_side for t in player_trackers}
                 unassigned_dets = [player_detections[i] for i in range(len(player_detections)) if i not in assigned_detections_indices]
                 for det in unassigned_dets:
@@ -246,9 +206,8 @@ def main(debug=False):
                     if det_side and det_side not in existing_sides:
                         new_tracker = KalmanTracker(det); new_tracker.court_side = det_side; player_trackers.append(new_tracker); existing_sides.add(det_side)
         
-        player_trackers = [t for t in player_trackers if t.consecutive_invisible_count < 50] # Replay'ler uzun sürebileceği için eşiği biraz artır
+        player_trackers = [t for t in player_trackers if t.consecutive_invisible_count < 50]
 
-        # 3. GÖRSELLEŞTİRME (HER ZAMAN)
         display_frame = frame.copy()
         top_down_court_grid = np.zeros((top_down_height, top_down_width, 3), dtype=np.uint8); top_down_court_grid = draw_grid(top_down_court_grid)
 
@@ -259,15 +218,23 @@ def main(debug=False):
             viz_mask_bgr = cv2.cvtColor(viz_mask, cv2.COLOR_GRAY2BGR)
             cv2.addWeighted(viz_mask_bgr, 0.3, display_frame, 0.7, 0, display_frame)
             
-        cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 3) # Siyah arka plan
+        cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 3)
         cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
             
-        for tracker in player_trackers:
-            x, y, w_box, h_box = map(int, tracker.box)
-            color, label = ((0, 255, 0), "P_Top") if tracker.court_side == 'top' else (((255, 100, 0), "P_Bottom") if tracker.court_side == 'bottom' else ((0, 0, 255), "P_Unknown"))
-            cv2.rectangle(display_frame, (x, y), (x+w_box, y+h_box), color, 2); cv2.putText(display_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            tx, ty = get_top_down_coords(tracker.box, homography_matrix)
-            if tx is not None: cv2.circle(top_down_court_grid, (tx, ty), 12, color, -1); cv2.putText(top_down_court_grid, label, (tx - 50, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        # --- DEĞİŞTİRİLEN BÖLÜM: Oyuncu Çizimini Kontrole Bağlama ---
+        # SADECE GEÇERLİ KORT AÇISINDA OYUNCULARI VE KUŞ BAKIŞI KONUMLARINI ÇİZ
+        if is_court_view_active:
+            for tracker in player_trackers:
+                x, y, w_box, h_box = map(int, tracker.box)
+                color, label = ((0, 255, 0), "P_Top") if tracker.court_side == 'top' else (((255, 100, 0), "P_Bottom") if tracker.court_side == 'bottom' else ((0, 0, 255), "P_Unknown"))
+                cv2.rectangle(display_frame, (x, y), (x+w_box, y+h_box), color, 2); cv2.putText(display_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                
+                # Kuş bakışı haritayı da sadece geçerli açıda doldur
+                tx, ty = get_top_down_coords(tracker.box, homography_matrix)
+                if tx is not None: 
+                    cv2.circle(top_down_court_grid, (tx, ty), 12, color, -1); 
+                    cv2.putText(top_down_court_grid, label, (tx - 50, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        # --- DEĞİŞİKLİK SONU ---
 
         cv2.imshow("Tenis Analizi", display_frame); cv2.imshow("Kuş Bakışı Kort", top_down_court_grid)
         if debug and is_court_view_active and 'fg_mask_court_only' in locals():
