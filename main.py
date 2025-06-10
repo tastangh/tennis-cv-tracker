@@ -127,8 +127,12 @@ def main(debug=False):
     scale = target_width / test_frame.shape[1]; target_height = int(test_frame.shape[0] * scale)
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
-    TOP_BOTTOM_RATIO_RANGE = (0.3, 0.98); ASPECT_RATIO_RANGE = (1.0, 2.5)
-    INVALID_VIEW_THRESHOLD = 5; COURT_TOP_PADDING_PIXELS = 30
+    # --- AYARLANABİLİR PARAMETRELER ---
+    TOP_BOTTOM_RATIO_RANGE = (0.3, 0.98) 
+    ASPECT_RATIO_RANGE = (1.0, 2.5)     
+    INVALID_VIEW_THRESHOLD = 5          
+    COURT_TOP_PADDING_PIXELS = 30
+    COURT_HORIZONTAL_PADDING_PIXELS = 20 # Yatay genişletme miktarı
     
     bg_subtractor = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=16, detectShadows=False)
     
@@ -171,9 +175,15 @@ def main(debug=False):
         else: status_text, status_color = "Kort Aci Kontrolu Basarisiz (Replay?)", (0, 0, 255)
 
         if is_court_view_active and last_known_corners is not None:
-            padded_corners = np.copy(last_known_corners); indices = np.argsort(padded_corners[:, 1])
-            padded_corners[indices[:2], 1] -= COURT_TOP_PADDING_PIXELS
+            # --- KÖŞE GENİŞLETME MANTIĞI ---
+            padded_corners = np.copy(last_known_corners)
+            y_indices = np.argsort(padded_corners[:, 1]); x_indices = np.argsort(padded_corners[:, 0])
+            padded_corners[y_indices[:2], 1] -= COURT_TOP_PADDING_PIXELS      # Dikey genişletme
+            padded_corners[x_indices[:2], 0] -= COURT_HORIZONTAL_PADDING_PIXELS # Yatay genişletme (sol)
+            padded_corners[x_indices[2:], 0] += COURT_HORIZONTAL_PADDING_PIXELS # Yatay genişletme (sağ)
+
             play_area_mask = np.zeros(frame.shape[:2], dtype=np.uint8); cv2.drawContours(play_area_mask, [cv2.convexHull(padded_corners)], -1, 255, -1)
+            
             blurred_frame = cv2.GaussianBlur(frame, (5, 5), 0)
             fg_mask_raw = bg_subtractor.apply(blurred_frame, learningRate=0.005)
             fg_mask_court_only = cv2.bitwise_and(fg_mask_raw, fg_mask_raw, mask=play_area_mask)
@@ -212,8 +222,13 @@ def main(debug=False):
         top_down_court_grid = np.zeros((top_down_height, top_down_width, 3), dtype=np.uint8); top_down_court_grid = draw_grid(top_down_court_grid)
 
         if is_court_view_active and last_known_corners is not None:
-            padded_corners_viz = np.copy(last_known_corners); indices = np.argsort(padded_corners_viz[:, 1])
-            padded_corners_viz[indices[:2], 1] -= COURT_TOP_PADDING_PIXELS
+            # Görselleştirme için de aynı genişletme mantığını kullan
+            padded_corners_viz = np.copy(last_known_corners)
+            y_indices_viz = np.argsort(padded_corners_viz[:, 1]); x_indices_viz = np.argsort(padded_corners_viz[:, 0])
+            padded_corners_viz[y_indices_viz[:2], 1] -= COURT_TOP_PADDING_PIXELS
+            padded_corners_viz[x_indices_viz[:2], 0] -= COURT_HORIZONTAL_PADDING_PIXELS
+            padded_corners_viz[x_indices_viz[2:], 0] += COURT_HORIZONTAL_PADDING_PIXELS
+            
             viz_mask = np.zeros(frame.shape[:2], dtype=np.uint8); cv2.drawContours(viz_mask, [cv2.convexHull(padded_corners_viz)], -1, 255, -1)
             viz_mask_bgr = cv2.cvtColor(viz_mask, cv2.COLOR_GRAY2BGR)
             cv2.addWeighted(viz_mask_bgr, 0.3, display_frame, 0.7, 0, display_frame)
@@ -221,20 +236,15 @@ def main(debug=False):
         cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 3)
         cv2.putText(display_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
             
-        # --- DEĞİŞTİRİLEN BÖLÜM: Oyuncu Çizimini Kontrole Bağlama ---
-        # SADECE GEÇERLİ KORT AÇISINDA OYUNCULARI VE KUŞ BAKIŞI KONUMLARINI ÇİZ
         if is_court_view_active:
             for tracker in player_trackers:
                 x, y, w_box, h_box = map(int, tracker.box)
                 color, label = ((0, 255, 0), "P_Top") if tracker.court_side == 'top' else (((255, 100, 0), "P_Bottom") if tracker.court_side == 'bottom' else ((0, 0, 255), "P_Unknown"))
                 cv2.rectangle(display_frame, (x, y), (x+w_box, y+h_box), color, 2); cv2.putText(display_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                
-                # Kuş bakışı haritayı da sadece geçerli açıda doldur
                 tx, ty = get_top_down_coords(tracker.box, homography_matrix)
                 if tx is not None: 
                     cv2.circle(top_down_court_grid, (tx, ty), 12, color, -1); 
                     cv2.putText(top_down_court_grid, label, (tx - 50, ty + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        # --- DEĞİŞİKLİK SONU ---
 
         cv2.imshow("Tenis Analizi", display_frame); cv2.imshow("Kuş Bakışı Kort", top_down_court_grid)
         if debug and is_court_view_active and 'fg_mask_court_only' in locals():
