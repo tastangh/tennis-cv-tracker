@@ -1,13 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import numpy as np
 import cv2
 import math
 import os
 from collections import deque
 
-# --- KalmanTracker Sınıfı (Değişiklik Yok) ---
 class KalmanTracker:
     def __init__(self, initial_box):
         self.kf = cv2.KalmanFilter(4, 2); self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
@@ -23,7 +19,6 @@ class KalmanTracker:
         x, y, w, h = box; measurement = np.array([[x + w/2], [y + h/2]], np.float32)
         self.kf.correct(measurement); self.box = box; self.consecutive_invisible_count = 0
 
-# --- Yardımcı Fonksiyonlar ---
 def detect_court_in_roi(roi_frame):
     gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)); enhanced_gray = clahe.apply(gray)
@@ -94,16 +89,14 @@ def merge_overlapping_boxes(boxes, proximity_thresh=50):
             if merged: break
     return boxes
 
-# <<< DEĞİŞTİ: Fonksiyon artık kortun dikey sınırlarını ve boyut parametrelerini alıyor
 def detect_players_motion_only(fg_mask, court_polygon, court_y_bounds, player_size_params, min_area=300):
     if court_polygon is None: return []
 
-    # Parametreleri ve kort sınırlarını al
     court_top_y, court_bottom_y = court_y_bounds
     max_h_top = player_size_params['max_height_top']
     max_h_bottom = player_size_params['max_height_bottom']
     court_height = court_bottom_y - court_top_y
-    if court_height <= 0: court_height = 1 # Sıfıra bölme hatasını önle
+    if court_height <= 0: court_height = 1 
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     processed_mask = cv2.dilate(fg_mask, kernel, iterations=2)
@@ -114,21 +107,14 @@ def detect_players_motion_only(fg_mask, court_polygon, court_y_bounds, player_si
     for c in contours:
         (x, y, w, h) = cv2.boundingRect(c)
         
-        # Temel kontroller (kort içinde mi, çok mu küçük, en/boy oranı bozuk mu?)
         if cv2.pointPolygonTest(court_polygon, (x + w // 2, y + h // 2), False) < 0: continue
         if cv2.contourArea(c) < min_area or w > h * 1.5 or h > w * 8: continue
 
-        # <<< YENİ: Dinamik Maksimum Yükseklik Kontrolü >>>
-        # Kutunun orta noktasının y'sine göre izin verilen maksimum yüksekliği hesapla
         box_center_y = y + h / 2
-        # y'nin kort sınırları içindeki göreceli konumunu bul (0.0 en üst, 1.0 en alt)
         y_ratio = (box_center_y - court_top_y) / court_height
-        y_ratio = np.clip(y_ratio, 0, 1) # Oranı 0-1 aralığında tut
-        
-        # İzin verilen maksimum yüksekliği enterpolasyon ile hesapla
+        y_ratio = np.clip(y_ratio, 0, 1) 
         allowed_max_height = max_h_top + y_ratio * (max_h_bottom - max_h_top)
 
-        # Eğer kutunun yüksekliği, o konum için izin verilenden büyükse, bu adayı atla
         if h > allowed_max_height:
             continue
 
@@ -241,7 +227,6 @@ def create_combined_view(main_frame, motion_mask, sketch_view, debug_mode, is_ac
         cv2.putText(right_column, "Kroki Yok", (target_w//2 - 50, target_h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     return cv2.hconcat([left_column, right_column])
 
-# --- Ana Fonksiyon ---
 def main(debug=False):
     video_path = 'tennis.mp4'
     if not os.path.exists(video_path): print(f"Hata: '{video_path}' bulunamadı."); return
@@ -251,7 +236,6 @@ def main(debug=False):
     scale = target_width / test_frame.shape[1]; target_height = int(test_frame.shape[0] * scale)
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
-    # --- AYARLANABİLİR PARAMETRELER ---
     TOP_BOTTOM_RATIO_RANGE = (0.3, 0.98)
     ASPECT_RATIO_RANGE = (1.0, 2.5)
     VERTICAL_LINE_ANGLE_RANGE = (60, 120)
@@ -262,9 +246,8 @@ def main(debug=False):
     MAX_PLAYER_JUMP_DISTANCE = 150
     MAX_PLAYER_INVISIBLE_FRAMES = 25
     
-    MAX_PLAYER_HEIGHT_TOP = 120    # Sahanın üst (uzak) kısmındaki oyuncu için maksimum yükseklik
-    MAX_PLAYER_HEIGHT_BOTTOM = 280 # Sahanın alt (yakın) kısmındaki oyuncu için maksimum yükseklik
-
+    MAX_PLAYER_HEIGHT_TOP = 120    
+    MAX_PLAYER_HEIGHT_BOTTOM = 280 
     ball_params = { 'MIN_BALL_CONTOUR_AREA': 8, 'MAX_BALL_CONTOUR_AREA': 100, 'BALL_MIN_WIDTH_HEIGHT': 3, 'BALL_MAX_WIDTH_HEIGHT': 25, 'BALL_MIN_ASPECT_RATIO': 0.7, 'BALL_MAX_ASPECT_RATIO': 1.4, 'BALL_MIN_SOLIDITY': 0.75, 'MAX_BALL_LOST_FRAMES': 10, 'MAX_BALL_JUMP_DISTANCE': 80, 'SEARCH_REGION_PADDING': 50 }
     viz_params = { 'player_viz_colors': {0:(255, 0, 255), 1:(128, 0, 0)}, 'player_viz_colors_lost': {0:(160, 0, 160), 1:(80, 0, 0)}, 'ball_viz_color':(0, 255, 0), 'SKETCH_BALL_HISTORY_LEN': 7, 'BALL_FADE_DURATION_SKETCH': 12 }    
     
@@ -327,12 +310,10 @@ def main(debug=False):
             fg_mask_raw = bg_subtractor.apply(blurred_frame, learningRate=0.005)
             fg_mask_court_only = cv2.bitwise_and(fg_mask_raw, fg_mask_raw, mask=play_area_mask)
             
-            # 1. Mevcut takipçiler için bir sonraki konumu tahmin et
             for side in player_trackers:
                 if player_trackers[side]:
                     player_trackers[side].predict()
 
-            # 2. Yeni tespitleri al (Dinamik boyut kontrolü ile)
             court_y_bounds = (np.min(last_known_corners[:, 1]), np.max(last_known_corners[:, 1]))
             player_size_params = {
                 'max_height_top': MAX_PLAYER_HEIGHT_TOP,
@@ -340,7 +321,6 @@ def main(debug=False):
             }
             player_detections = detect_players_motion_only(fg_mask_court_only, court_polygon, court_y_bounds, player_size_params)
             
-            # 3. Tespitleri yarı sahalara ayır
             top_detections, bottom_detections = [], []
             for i, det in enumerate(player_detections):
                 side = get_court_side(det, homography_matrix, court_center_y_top_down)
@@ -349,7 +329,6 @@ def main(debug=False):
 
             used_detection_ids = set()
 
-            # 4. Mevcut takipçileri en yakın tespitlerle eşleştir
             for side, tracker in player_trackers.items():
                 if tracker:
                     detections_on_side = top_detections if side == 'top' else bottom_detections
@@ -366,7 +345,6 @@ def main(debug=False):
                         tracker.update(best_match['box'])
                         used_detection_ids.add(best_match['id'])
 
-            # 5. Boş oyuncu slotlarını doldurmak için kullanılmamış tespitleri kullan
             for side in ['top', 'bottom']:
                 if player_trackers[side] is None:
                     detections_on_side = top_detections if side == 'top' else bottom_detections
@@ -378,12 +356,10 @@ def main(debug=False):
                         player_trackers[side] = new_tracker
                         used_detection_ids.add(best_new_detection['id'])
 
-            # 6. Çok uzun süre görünmeyen takipçileri temizle
             for side, tracker in player_trackers.items():
                 if tracker and tracker.consecutive_invisible_count > MAX_PLAYER_INVISIBLE_FRAMES:
                     player_trackers[side] = None
 
-            # 7. Top tespiti
             active_player_bboxes = [t for t in player_trackers.values() if t is not None]
             detected_ball_info = detect_ball(fg_mask_court_only, last_known_ball_center, ball_lost_counter, cv2.convexHull(last_known_corners), active_player_bboxes, ball_params)
             if detected_ball_info: last_known_ball_center = detected_ball_info[1]; ball_lost_counter = 0; ball_trail_video.append((last_known_ball_center, frame_counter))
@@ -394,7 +370,6 @@ def main(debug=False):
             ball_lost_counter += 1
             if ball_lost_counter > ball_params['MAX_BALL_LOST_FRAMES']: last_known_ball_center = None; ball_trail_video.clear()
 
-        # --- GÖRSELLEŞTİRME ---
         display_frame = frame.copy()
         sketch_display = None
         if base_sketch_resized is not None:
